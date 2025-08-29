@@ -1,4 +1,15 @@
-library(hal9001)
+# This script includes an implementation of of the higher order HAL
+# 
+# Todo:
+#   Add general loss function parameter to penalized lm
+# 
+# 
+# 
+# 
+# ==============================================================================
+
+
+ibrary(hal9001)
 library(data.table)
 
 # ----------------------
@@ -94,8 +105,99 @@ d <- cbind(Y,basis_expansion)
 # ----------------------
 # Step 5. Refit LM using selected covariates
 # ----------------------
-## Add penalizing (OLS)
-higher_order_hal_MLE <- lm(Y~.-1,data = d)
+## Add penalizing (OLS) with both ridge and lasso penalizing
+##  and general loss function
+
+# A penalized linear model (todo: general loss) 
+penalized_lm <- function(X, y, lambda = 1, penalty = c("ridge", "lasso")) {
+  penalty <- match.arg(penalty)
+  
+  # Add intercept
+  X <- as.matrix(X)
+  n <- nrow(X)
+  p <- ncol(X)
+  
+  # Objective function
+  obj <- function(beta) {
+    residuals <- y - X %*% beta
+    rss <- sum(residuals^2)
+    
+    if (penalty == "ridge") {
+      penalty_val <- lambda * sum(beta[-1]^2)  # exclude intercept
+    } else if (penalty == "lasso") {
+      penalty_val <- lambda * sum(abs(beta[-1]))
+    }
+    
+    return(rss + penalty_val)
+  }
+  
+  # Optimize using optim
+  fit <- optim(rep(0, p), obj, method = "BFGS")
+  
+  coefficients <- fit$par
+  names(coefficients) <- c("Intercept", colnames(X)[-1])
+  
+  list(coefficients = coefficients,
+       lambda = lambda,
+       penalty = penalty,
+       value = fit$value,
+       convergence = fit$convergence)
+}
+
+# Add a cross validation step to the penalized lm
+cv_penalised_lm <- function(X, y, lambda_seq, penalty = c("ridge", "lasso"),
+                         K = 5, seed = 123) {
+  penalty <- match.arg(penalty)
+  set.seed(seed)
+  
+  # define folds
+  n <- nrow(X)
+  folds <- sample(rep(1:K, length.out = n))
+  
+  errors <- matrix(NA, nrow = K, ncol = length(lambda_seq))
+  
+  for(k in 1:K){
+    
+    train_idx <- which(folds != k)
+    valid_idx <- which(folds == k)
+    
+    X_train <- X[train_idx, , drop = FALSE]
+    y_train <- y[train_idx]
+    X_valid <- X[valid_idx, , drop = FALSE]
+    y_valid <- y[valid_idx]
+    for (j in seq_along(lambda_seq)){ 
+    
+      fit <- penalized_lm(X_train, y_train,
+                          lambda = lambda_seq[j],
+                          penalty = penalty)
+    
+      # Prediction
+      Xmat_valid <- as.matrix(X_valid)
+      yhat <- drop(Xmat_valid %*% fit$coefficients)
+      
+      errors[k, j] <- mean((y_valid - yhat)^2)
+    }
+  }
+  
+  mean_cv_error <- colMeans(cv_errors)
+  best_index <- which.min(mean_cv_error)
+  best_lambda <- lambda_seq[best_index]
+  # Refit on full data at best lambda
+  best_fit <- penalised_lm(X, y, lambda = best_lambda, penalty = penalty)
+  
+  list(cv_errors = cv_errors,
+       mean_cv_error = mean_cv_error,
+       lambda_seq = lambda_seq,
+       best_lambda = best_lambda,
+       best_index = best_index,
+       coefficients = best_fit$coefficients)
+}
+
+lambda_seq <- seq(0.1, 10, length.out = 20)
+
+cv_higher_order_hal_MLE <- cv_penalised_lm(X = basis_expansion, Y,lambda_seq = lambda_seq, penalty = "lasso")
+
+higher_order_hal_MLE_unpen <- lm(Y~.-1,data = d)
 
 # ----------------------
 # Step 6. Compute regression function along grid
@@ -111,12 +213,20 @@ grid1 <- data.table(X1 = X1_vals, X2 = 1)
 nd0 <- evaluate_spline_at_point(points = grid0)
 nd1 <- evaluate_spline_at_point(points = grid1)
 
-# Step 3: Predict using the refitted LM
-pred0 <- predict(higher_order_hal_MLE, newdata = nd0)
-pred1 <- predict(higher_order_hal_MLE, newdata = nd1)
+# Step 3: Predict using the refitted penalized LM
+pen_pred0 <- as.matrix(nd0)%*%higher_order_hal_MLE$coefficients
+pen_pred1 <- as.matrix(nd1)%*%higher_order_hal_MLE$coefficients
+
+pred0 <- predict(higher_order_hal_MLE_unpen, newdata = nd0)
+pred1 <- predict(higher_order_hal_MLE_unpen, newdata = nd1)
 
 # Step 4: Combine for plotting
 plot_dt <- data.table(
+  X1 = rep(X1_vals, 2),
+  X2 = rep(c(0, 1), each = n_grid),
+  pred = c(pen_pred0, pen_pred1)
+)
+plot_dt_unpen <- data.table(
   X1 = rep(X1_vals, 2),
   X2 = rep(c(0, 1), each = n_grid),
   pred = c(pred0, pred1)
@@ -125,12 +235,73 @@ plot_dt <- data.table(
 # Step 5: Plot
 library(ggplot2)
 ggplot(plot_dt, aes(x = X1, y = pred, color = factor(X2))) +
-  geom_smooth() +
-  # geom_line(size = 1) +
+  # geom_smooth() +
+  geom_line(size = 1) +
   labs(x = "X1", y = "Predicted Y", color = "X2") +
   theme_minimal() + 
-  # stat_function(fun = function(x) exp(2*x), color = "red", size = 1) +
+  stat_function(fun = function(x) exp(2*x), color = "red", size = 1) +
   stat_function(fun = function(x) 10*exp(-3*(sin(10*(x-0.5))^2)), color = "red", size = 1)
+# plot the unpenalized model
+ggplot(plot_dt_unpen, aes(x = X1, y = pred, color = factor(X2))) +
+  # geom_smooth() +
+  geom_line(size = 1) +
+  labs(x = "X1", y = "Predicted Y", color = "X2") +
+  theme_minimal() + 
+  stat_function(fun = function(x) exp(2*x), color = "red", size = 1) +
+  stat_function(fun = function(x) 10*exp(-3*(sin(10*(x-0.5))^2)), color = "red", size = 1)
+
+# =================================
+# Compare to hal9001 with smoothness_orders = 0 (ordinary HAL)
+# =================================
+
+# ----------------------
+# Step 1. Fit HAL
+# ----------------------
+library(hal9001)
+fit_hal_0 <- fit_hal(
+  X = X, Y = Y,
+  family = "gaussian",
+  max_degree = p,
+  smoothness_orders = 0
+)
+
+# ----------------------
+# Step 2. Define prediction grids
+# ----------------------
+n_grid <- 500
+X1_vals <- seq(0, 1, length.out = n_grid)
+
+grid0 <- data.frame(X1 = X1_vals, X2 = 0)
+grid1 <- data.frame(X1 = X1_vals, X2 = 1)
+
+# ----------------------
+# Step 3. Predict with HAL
+# ----------------------
+pred0_hal9001_0 <- predict(fit_hal_0, new_data = grid0)
+pred1_hal9001_0 <- predict(fit_hal_0, new_data = grid1)
+
+# ----------------------
+# Step 4. Combine for plotting
+# ----------------------
+library(data.table)
+plot_dt_hal9001_0 <- data.table(
+  X1 = rep(X1_vals, 2),
+  X2 = rep(c(0, 1), each = n_grid),
+  pred = c(pred0_hal9001_0, pred1_hal9001_0)
+)
+
+# ----------------------
+# Step 5. Plot
+# ----------------------
+library(ggplot2)
+ggplot(plot_dt_hal9001_0, aes(x = X1, y = pred, color = factor(X2))) +
+  geom_line(size = 1) +
+  labs(x = "X1", y = "Predicted Y", color = "X2") +
+  theme_minimal() + 
+  stat_function(fun = function(x) exp(2*x), color = "green", size = 1) +
+  stat_function(fun = function(x) 10*exp(-3*(sin(10*(x-0.5))^2)), color = "orange", size = 1)
+
+
 
 # =================================
 # Compare to hal9001 with smoothness_orders = 3
@@ -182,38 +353,4 @@ ggplot(plot_dt_hal9001, aes(x = X1, y = pred, color = factor(X2))) +
   theme_minimal() + 
   stat_function(fun = function(x) exp(2*x), color = "green", size = 1) +
   stat_function(fun = function(x) 10*exp(-3*(sin(10*(x-0.5))^2)), color = "orange", size = 1)
-# 10*exp(-3*(sin(10*(X[,1]-0.5))^2))
-# grid0 <- matrix(ncol = 2,c(seq(0,1,0.001),rep(0,length(seq(0,1,0.001)))))
-# colnames(grid0) <- paste0("X", 1:p)
-# nd0 <- evaluate_spline_at_point(points = grid0)
-# pred0 <- predict(higher_order_hal_MLE, newdata = nd0)
-# 
-# grid1 <- matrix(ncol = 2,c(seq(0,1,0.001),rep(1,length(seq(0,1,0.001)))))
-# colnames(grid1) <- paste0("X", 1:p)
-# nd1 <- evaluate_spline_at_point(points = grid1)
-# pred1 <- predict(higher_order_hal_MLE, newdata = nd1)
-# 
-# n_grid <- 500
-# X1_vals <- seq(0, 1, length.out = n_grid)
-# 
-# grid0 <- data.table(X1 = X1_vals, X2 = 0)
-# colnames(grid0) <- paste0("X", 1:p)
-# nd0 <- evaluate_spline_at_point(points = grid0)
-# 
-# grid1 <- data.table(X1 = X1_vals, X2 = 1)
-# colnames(grid1) <- paste0("X", 1:p)
-# nd1 <- evaluate_spline_at_point(points = grid1)
-# 
-# pred0 <- predict(higher_order_hal_MLE, newdata = nd0)
-# pred1 <- predict(higher_order_hal_MLE, newdata = nd1)
-# 
-# plot_dt <- data.table(
-#   X1 = rep(X1_vals, 2),
-#   X2 = rep(c(0,1), each = n_grid),
-#   pred = c(pred0, pred1)
-# )
-# ggplot(plot_dt, aes(x = X1, y = pred, color = factor(X2))) +
-#   geom_line(size = 1) +
-#   labs(x = "X1", y = "HAL estimate", color = "X2") +
-#   theme_minimal()
-# 
+

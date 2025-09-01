@@ -9,14 +9,14 @@
 # ==============================================================================
 
 
-ibrary(hal9001)
+library(hal9001)
 library(data.table)
 
 # ----------------------
 # Step 1. Simulate data (non-linear)
 # ----------------------
 set.seed(123)
-n <- 2000
+n <- 200
 p <- 2
 X <- matrix(ncol = 2, c(runif(n,0,1),rbinom(n,size = 1, prob = 0.5)))  # uniform covariates
 colnames(X) <- paste0("X", 1:p)
@@ -145,7 +145,7 @@ penalized_lm <- function(X, y, lambda = 1, penalty = c("ridge", "lasso")) {
 }
 
 # Add a cross validation step to the penalized lm
-cv_penalised_lm <- function(X, y, lambda_seq, penalty = c("ridge", "lasso"),
+cv_penalized_lm <- function(X, y, lambda_seq, penalty = c("ridge", "lasso"),
                          K = 5, seed = 123) {
   penalty <- match.arg(penalty)
   set.seed(seed)
@@ -193,9 +193,9 @@ cv_penalised_lm <- function(X, y, lambda_seq, penalty = c("ridge", "lasso"),
        coefficients = best_fit$coefficients)
 }
 
-lambda_seq <- seq(0.1, 10, length.out = 20)
+lambda_seq <- seq(0.1, 1, length.out = 20)
 
-cv_higher_order_hal_MLE <- cv_penalised_lm(X = basis_expansion, Y,lambda_seq = lambda_seq, penalty = "lasso")
+cv_higher_order_hal_MLE <- cv_penalized_lm(X = basis_expansion, Y,lambda_seq = lambda_seq, penalty = "lasso")
 
 higher_order_hal_MLE_unpen <- lm(Y~.-1,data = d)
 
@@ -214,8 +214,8 @@ nd0 <- evaluate_spline_at_point(points = grid0)
 nd1 <- evaluate_spline_at_point(points = grid1)
 
 # Step 3: Predict using the refitted penalized LM
-pen_pred0 <- as.matrix(nd0)%*%higher_order_hal_MLE$coefficients
-pen_pred1 <- as.matrix(nd1)%*%higher_order_hal_MLE$coefficients
+pen_pred0 <- as.matrix(nd0)%*%cv_higher_order_hal_MLE$coefficients
+pen_pred1 <- as.matrix(nd1)%*%cv_higher_order_hal_MLE$coefficients
 
 pred0 <- predict(higher_order_hal_MLE_unpen, newdata = nd0)
 pred1 <- predict(higher_order_hal_MLE_unpen, newdata = nd1)
@@ -353,4 +353,3 @@ ggplot(plot_dt_hal9001, aes(x = X1, y = pred, color = factor(X2))) +
   theme_minimal() + 
   stat_function(fun = function(x) exp(2*x), color = "green", size = 1) +
   stat_function(fun = function(x) 10*exp(-3*(sin(10*(x-0.5))^2)), color = "orange", size = 1)
-

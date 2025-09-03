@@ -11,12 +11,14 @@
 
 library(hal9001)
 library(data.table)
+library(glmnet)
+library(ggplot2)
 
 # ----------------------
 # Step 1. Simulate data (non-linear)
 # ----------------------
 set.seed(123)
-n <- 200
+n <- 10000
 p <- 2
 X <- matrix(ncol = 2, c(runif(n,0,1),rbinom(n,size = 1, prob = 0.5)))  # uniform covariates
 colnames(X) <- paste0("X", 1:p)
@@ -103,79 +105,203 @@ basis_expansion <- evaluate_spline_at_point(points = X, k = 3)
 d <- cbind(Y,basis_expansion)
 
 # ----------------------
-# Step 5. Refit LM using selected covariates
+# Step 5a. Refit a lasso penalized LM for different penalty hyperparameters
+# ----------------------
+lambda_seq <- seq(0,0.1,by = 0.01)
+
+# Prediction grid
+n_grid <- 500
+X1_vals <- seq(0, 1, length.out = n_grid)
+
+# Grids for X2 = 0 and X2 = 1
+grid0 <- data.table(X1 = X1_vals, X2 = 0)
+grid1 <- data.table(X1 = X1_vals, X2 = 1)
+
+# Evaluate HAL basis at grid points
+nd0 <- evaluate_spline_at_point(points = grid0)
+nd1 <- evaluate_spline_at_point(points = grid1)
+
+# Store predictions for each lambda
+plot_list <- list()
+
+for (lam in lambda_seq) {
+  # Fit glmnet with chosen lambda (lasso example)
+  fit <- glmnet(
+    x = as.matrix(basis_expansion),
+    y = Y,
+    alpha = 1,           # 1 = lasso, 0 = ridge
+    lambda = lam
+  )
+  
+  # Predict on the grids
+  pen_pred0 <- predict(fit, newx = as.matrix(nd0))
+  pen_pred1 <- predict(fit, newx = as.matrix(nd1))
+  
+  # Collect in data.table
+  plot_list[[as.character(lam)]] <- data.table(
+    X1 = rep(X1_vals, 2),
+    X2 = rep(c(0, 1), each = n_grid),
+    pred = c(pen_pred0, pen_pred1),
+    lambda = lam
+  )
+}
+
+# Combine results
+plot_dt <- rbindlist(plot_list)
+
+# Plot penalized fits
+ggplot(plot_dt, aes(x = X1, y = pred, color = factor(X2), group = interaction(X2, lambda))) +
+  geom_line(alpha = 0.7) +
+  labs(
+    x = "X1",
+    y = "Predicted Y",
+    color = "X2"
+  ) +
+  theme_minimal() +
+  stat_function(fun = function(x) exp(2*x), color = "red", size = 1) +
+  stat_function(fun = function(x) 10*exp(-3*(sin(10*(x-0.5))^2)), color = "red", size = 1) +
+  facet_wrap(~lambda, ncol = 3)   # one panel per lambda
+
+# ----------------------
+# Step 5b. Refit a ridge penalized LM for different penalty hyperparameters
+# ----------------------
+lambda_seq <- seq(0,0.1,by = 0.01)
+
+# Prediction grid
+n_grid <- 500
+X1_vals <- seq(0, 1, length.out = n_grid)
+
+# Grids for X2 = 0 and X2 = 1
+grid0 <- data.table(X1 = X1_vals, X2 = 0)
+grid1 <- data.table(X1 = X1_vals, X2 = 1)
+
+# Evaluate HAL basis at grid points
+nd0 <- evaluate_spline_at_point(points = grid0)
+nd1 <- evaluate_spline_at_point(points = grid1)
+
+# Store predictions for each lambda
+plot_list <- list()
+
+for (lam in lambda_seq) {
+  # Fit glmnet with chosen lambda (lasso example)
+  fit <- glmnet(
+    x = as.matrix(basis_expansion),
+    y = Y,
+    alpha = 0,           # 1 = lasso, 0 = ridge
+    lambda = lam
+  )
+  
+  # Predict on the grids
+  pen_pred0 <- predict(fit, newx = as.matrix(nd0))
+  pen_pred1 <- predict(fit, newx = as.matrix(nd1))
+  
+  # Collect in data.table
+  plot_list[[as.character(lam)]] <- data.table(
+    X1 = rep(X1_vals, 2),
+    X2 = rep(c(0, 1), each = n_grid),
+    pred = c(pen_pred0, pen_pred1),
+    lambda = lam
+  )
+}
+
+# Combine results
+plot_dt <- rbindlist(plot_list)
+
+# Plot penalized fits
+ggplot(plot_dt, aes(x = X1, y = pred, color = factor(X2), group = interaction(X2, lambda))) +
+  geom_line(alpha = 0.7) +
+  labs(
+    x = "X1",
+    y = "Predicted Y",
+    color = "X2"
+  ) +
+  theme_minimal() +
+  stat_function(fun = function(x) exp(2*x), color = "red", size = 1) +
+  stat_function(fun = function(x) 10*exp(-3*(sin(10*(x-0.5))^2)), color = "red", size = 1) +
+  facet_wrap(~lambda, ncol = 3)   # one panel per lambda
+
+# ----------------------
+# Step 5c1. Refit a penalized LM using selected cross-validation using lambda from
+#   a "raw" lasso fit
 # ----------------------
 ## Add penalizing (OLS) with both ridge and lasso penalizing
 ##  and general loss function
 
+# ===OUTDATED===================================================================
 # A penalized linear model (todo: general loss) 
-penalized_lm <- function(X, y, lambda = 1, penalty = c("ridge", "lasso")) {
-  penalty <- match.arg(penalty)
-  
-  # Add intercept
-  X <- as.matrix(X)
-  n <- nrow(X)
-  p <- ncol(X)
-  
-  # Objective function
-  obj <- function(beta) {
-    residuals <- y - X %*% beta
-    rss <- sum(residuals^2)
-    
-    if (penalty == "ridge") {
-      penalty_val <- lambda * sum(beta[-1]^2)  # exclude intercept
-    } else if (penalty == "lasso") {
-      penalty_val <- lambda * sum(abs(beta[-1]))
-    }
-    
-    return(rss + penalty_val)
-  }
-  
-  # Optimize using optim
-  fit <- optim(rep(0, p), obj, method = "BFGS")
-  
-  coefficients <- fit$par
-  names(coefficients) <- c("Intercept", colnames(X)[-1])
-  
-  list(coefficients = coefficients,
-       lambda = lambda,
-       penalty = penalty,
-       value = fit$value,
-       convergence = fit$convergence)
-}
+# penalized_lm <- function(X, y, lambda = 1, penalty = c("ridge", "lasso")) {
+#   penalty <- match.arg(penalty)
+#   
+#   # Add intercept
+#   X <- as.matrix(X)
+#   n <- nrow(X)
+#   p <- ncol(X)
+#   
+#   # Objective function
+#   obj <- function(beta) {
+#     residuals <- y - X %*% beta
+#     rss <- sum(residuals^2)
+#     
+#     if (penalty == "ridge") {
+#       penalty_val <- lambda * sum(beta[-1]^2)  # exclude intercept
+#     } else if (penalty == "lasso") {
+#       penalty_val <- lambda * sum(abs(beta[-1]))
+#     }
+#     
+#     return(rss + penalty_val)
+#   }
+#   
+#   # Optimize using optim
+#   fit <- optim(rep(0, p), obj, method = "BFGS")
+#   
+#   coefficients <- fit$par
+#   names(coefficients) <- c("Intercept", colnames(X)[-1])
+#   
+#   list(coefficients = coefficients,
+#        lambda = lambda,
+#        penalty = penalty,
+#        value = fit$value,
+#        convergence = fit$convergence)
+# }
+#===============================================================================
 
 # Add a cross validation step to the penalized lm
-cv_penalized_lm <- function(X, y, lambda_seq, penalty = c("ridge", "lasso"),
+cv_penalized_lm_lasso <- function(X, y, alpha,
                          K = 5, seed = 123) {
-  penalty <- match.arg(penalty)
   set.seed(seed)
+  
+  # Define hyperparameters
+  lambda_seq <- glmnet(
+    x = as.matrix(basis_expansion),
+    y = Y,
+    alpha = alpha         # 1 = lasso, 0 = ridge
+  )$lambda
   
   # define folds
   n <- nrow(X)
   folds <- sample(rep(1:K, length.out = n))
   
-  errors <- matrix(NA, nrow = K, ncol = length(lambda_seq))
+  cv_errors <- matrix(NA, nrow = K, ncol = length(lambda_seq))
   
   for(k in 1:K){
     
     train_idx <- which(folds != k)
     valid_idx <- which(folds == k)
     
-    X_train <- X[train_idx, , drop = FALSE]
+    X_train <- X[train_idx, drop = FALSE]
     y_train <- y[train_idx]
-    X_valid <- X[valid_idx, , drop = FALSE]
+    X_valid <- X[valid_idx, drop = FALSE]
     y_valid <- y[valid_idx]
     for (j in seq_along(lambda_seq)){ 
     
-      fit <- penalized_lm(X_train, y_train,
-                          lambda = lambda_seq[j],
-                          penalty = penalty)
+      fit <- glmnet(x = X_train, y = y_train,
+                          lambda = lambda_seq[j])
     
       # Prediction
       Xmat_valid <- as.matrix(X_valid)
-      yhat <- drop(Xmat_valid %*% fit$coefficients)
+      yhat <- predict(fit, newx = Xmat_valid)
       
-      errors[k, j] <- mean((y_valid - yhat)^2)
+      cv_errors[k, j] <- mean((y_valid - yhat)^2)
     }
   }
   
@@ -183,19 +309,21 @@ cv_penalized_lm <- function(X, y, lambda_seq, penalty = c("ridge", "lasso"),
   best_index <- which.min(mean_cv_error)
   best_lambda <- lambda_seq[best_index]
   # Refit on full data at best lambda
-  best_fit <- penalised_lm(X, y, lambda = best_lambda, penalty = penalty)
+  best_fit <- glmnet(X, y, lambda = best_lambda, alpha = alpha)
   
-  list(cv_errors = cv_errors,
-       mean_cv_error = mean_cv_error,
-       lambda_seq = lambda_seq,
-       best_lambda = best_lambda,
-       best_index = best_index,
-       coefficients = best_fit$coefficients)
+  return(best_fit)
+  
+  # list(cv_errors = cv_errors,
+  #      mean_cv_error = mean_cv_error,
+  #      lambda_seq = lambda_seq,
+  #      best_lambda = best_lambda,
+  #      best_index = best_index)
 }
 
-lambda_seq <- seq(0.1, 1, length.out = 20)
+# lambda_seq <- seq(0.1, 1, length.out = 20)
 
-cv_higher_order_hal_MLE <- cv_penalized_lm(X = basis_expansion, Y,lambda_seq = lambda_seq, penalty = "lasso")
+cv_higher_order_hal_lasso <- cv_penalized_lm_lasso(X = basis_expansion, y = Y,alpha = 1)
+cv_higher_order_hal_ridge <- cv_penalized_lm_lasso(X = basis_expansion, y = Y,alpha = 0)
 
 higher_order_hal_MLE_unpen <- lm(Y~.-1,data = d)
 
@@ -214,17 +342,25 @@ nd0 <- evaluate_spline_at_point(points = grid0)
 nd1 <- evaluate_spline_at_point(points = grid1)
 
 # Step 3: Predict using the refitted penalized LM
-pen_pred0 <- as.matrix(nd0)%*%cv_higher_order_hal_MLE$coefficients
-pen_pred1 <- as.matrix(nd1)%*%cv_higher_order_hal_MLE$coefficients
+pen_pred0_lasso <- predict(cv_higher_order_hal_lasso, newx = as.matrix(nd0))
+pen_pred1_lasso <- predict(cv_higher_order_hal_lasso, newx = as.matrix(nd1))
+
+pen_pred0_ridge <- predict(cv_higher_order_hal_ridge, newx = as.matrix(nd0))
+pen_pred1_ridge <- predict(cv_higher_order_hal_ridge, newx = as.matrix(nd1))
 
 pred0 <- predict(higher_order_hal_MLE_unpen, newdata = nd0)
 pred1 <- predict(higher_order_hal_MLE_unpen, newdata = nd1)
 
 # Step 4: Combine for plotting
-plot_dt <- data.table(
+plot_dt_lasso <- data.table(
   X1 = rep(X1_vals, 2),
   X2 = rep(c(0, 1), each = n_grid),
-  pred = c(pen_pred0, pen_pred1)
+  pred = c(pen_pred0_lasso, pen_pred1_lasso)
+)
+plot_dt_ridge <- data.table(
+  X1 = rep(X1_vals, 2),
+  X2 = rep(c(0, 1), each = n_grid),
+  pred = c(pen_pred0_ridge, pen_pred1_ridge)
 )
 plot_dt_unpen <- data.table(
   X1 = rep(X1_vals, 2),
@@ -234,21 +370,28 @@ plot_dt_unpen <- data.table(
 
 # Step 5: Plot
 library(ggplot2)
-ggplot(plot_dt, aes(x = X1, y = pred, color = factor(X2))) +
+ggplot(plot_dt_lasso, aes(x = X1, y = pred, color = factor(X2))) +
   # geom_smooth() +
   geom_line(size = 1) +
-  labs(x = "X1", y = "Predicted Y", color = "X2") +
+  labs(x = "X1", y = "Predicted Y", color = "X2", title = "Lasso penalization") +
   theme_minimal() + 
-  stat_function(fun = function(x) exp(2*x), color = "red", size = 1) +
-  stat_function(fun = function(x) 10*exp(-3*(sin(10*(x-0.5))^2)), color = "red", size = 1)
+  stat_function(fun = function(x) exp(2*x), color = "blue", size = 1, linetype = "dashed") +
+  stat_function(fun = function(x) 10*exp(-3*(sin(10*(x-0.5))^2)), color = "red", size = 1, linetype = "dashed")
+ggplot(plot_dt_ridge, aes(x = X1, y = pred, color = factor(X2))) +
+  # geom_smooth() +
+  geom_line(size = 1) +
+  labs(x = "X1", y = "Predicted Y", color = "X2", title = "Ridge penalization") +
+  theme_minimal() + 
+  stat_function(fun = function(x) exp(2*x), color = "blue", size = 1, linetype = "dashed") +
+  stat_function(fun = function(x) 10*exp(-3*(sin(10*(x-0.5))^2)), color = "red", size = 1, linetype = "dashed")
 # plot the unpenalized model
 ggplot(plot_dt_unpen, aes(x = X1, y = pred, color = factor(X2))) +
   # geom_smooth() +
   geom_line(size = 1) +
-  labs(x = "X1", y = "Predicted Y", color = "X2") +
+  labs(x = "X1", y = "Predicted Y", color = "X2", title = "No penalization") +
   theme_minimal() + 
-  stat_function(fun = function(x) exp(2*x), color = "red", size = 1) +
-  stat_function(fun = function(x) 10*exp(-3*(sin(10*(x-0.5))^2)), color = "red", size = 1)
+  stat_function(fun = function(x) exp(2*x), color = "blue", size = 1, linetype = "dashed") +
+  stat_function(fun = function(x) 10*exp(-3*(sin(10*(x-0.5))^2)), color = "red", size = 1, linetype = "dashed")
 
 # =================================
 # Compare to hal9001 with smoothness_orders = 0 (ordinary HAL)
@@ -353,3 +496,4 @@ ggplot(plot_dt_hal9001, aes(x = X1, y = pred, color = factor(X2))) +
   theme_minimal() + 
   stat_function(fun = function(x) exp(2*x), color = "green", size = 1) +
   stat_function(fun = function(x) 10*exp(-3*(sin(10*(x-0.5))^2)), color = "orange", size = 1)
+
